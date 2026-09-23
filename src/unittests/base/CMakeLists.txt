@@ -37,3 +37,11 @@ create_test(
   WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/src/lib/base"
 )
 
+
+create_test(
+  NAME ClipboardBitmapTests
+  DEPENDS base
+  LIBS arch
+  SOURCE ClipboardBitmapTests.cpp
+  WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/src/lib/base"
+)

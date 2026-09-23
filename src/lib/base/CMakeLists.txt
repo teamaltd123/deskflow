@@ -6,6 +6,8 @@
 add_library(base STATIC
   BaseException.cpp
   BaseException.h
+  ClipboardBitmap.cpp
+  ClipboardBitmap.h
   DirectionTypes.h
   Event.h
   EventQueue.cpp

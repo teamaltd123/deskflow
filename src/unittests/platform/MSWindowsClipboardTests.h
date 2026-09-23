@@ -29,9 +29,11 @@ private Q_SLOTS:
   void getNonEmptyText();
   void isOwnedByDeskflow();
   void normalisesMalformedMacBitmap();
-  void preservesHealthyMacV5Bitmap();
+  void convertsHealthyMacV5Bitmap();
 
 private:
+  void verifyCanonicalPixel(const std::string &dib);
+
   Log m_log;
   const std::string m_testString = "deskflow test string";
   const std::string m_testString2 = "Another String";

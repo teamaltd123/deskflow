@@ -141,7 +141,8 @@ void MSWindowsClipboardTests::isOwnedByDeskflow()
 
 void MSWindowsClipboardTests::normalisesMalformedMacBitmap()
 {
-  // A 1x1 top-down macOS DIB that incorrectly declares a V5 header.
+  // A 1x1 top-down DIB sent by Deskflow <= 1.26 on macOS: it declares a V5 header
+  // but carries only an INFOHEADER before the BGRA pixel.
   constexpr qsizetype headerSize = sizeof(BITMAPINFOHEADER);
   std::string dib(headerSize + 4, '\0');
   auto *raw = reinterpret_cast<quint8 *>(&dib[0]);
@@ -151,24 +152,17 @@ void MSWindowsClipboardTests::normalisesMalformedMacBitmap()
   qToLittleEndian<quint16>(1, raw + 12);
   qToLittleEndian<quint16>(32, raw + 14);
   qToLittleEndian<quint32>(BI_BITFIELDS, raw + 16);
+  raw[headerSize] = 0x12;
+  raw[headerSize + 1] = 0x34;
+  raw[headerSize + 2] = 0x56;
   raw[headerSize + 3] = 0xff;
 
-  MSWindowsClipboardBitmapConverter converter;
-  const auto handle = converter.fromIClipboard(dib);
-  QVERIFY(handle != nullptr);
-  QCOMPARE(GlobalSize(handle), SIZE_T(headerSize + 4));
-  const auto *result = static_cast<const quint8 *>(GlobalLock(handle));
-  QVERIFY(result != nullptr);
-  QCOMPARE(qFromLittleEndian<quint32>(result), quint32(headerSize));
-  QCOMPARE(qFromLittleEndian<quint32>(result + 16), quint32(BI_RGB));
-  QCOMPARE(result[headerSize + 3], quint8(0xff));
-  GlobalUnlock(handle);
-  GlobalFree(handle);
+  verifyCanonicalPixel(dib);
 }
 
-void MSWindowsClipboardTests::preservesHealthyMacV5Bitmap()
+void MSWindowsClipboardTests::convertsHealthyMacV5Bitmap()
 {
-  // A complete 1x1 top-down macOS V5 DIB with BGRA colour masks and one pixel.
+  // A complete 1x1 top-down macOS V5 DIB with BGRA colour masks and one opaque pixel.
   constexpr qsizetype headerSize = sizeof(BITMAPV5HEADER);
   std::string dib(headerSize + 4, '\0');
   auto *raw = reinterpret_cast<quint8 *>(&dib[0]);
@@ -185,15 +179,29 @@ void MSWindowsClipboardTests::preservesHealthyMacV5Bitmap()
   raw[headerSize] = 0x12;
   raw[headerSize + 1] = 0x34;
   raw[headerSize + 2] = 0x56;
-  raw[headerSize + 3] = 0x78;
+  raw[headerSize + 3] = 0xff;
 
+  verifyCanonicalPixel(dib);
+}
+
+void MSWindowsClipboardTests::verifyCanonicalPixel(const std::string &dib)
+{
+  // Every image is published as a 40 byte BI_RGB header, 24 bpp, bottom-up rows
+  // padded to 4 bytes: the form every Windows app can read.
+  constexpr qsizetype headerSize = sizeof(BITMAPINFOHEADER);
   MSWindowsClipboardBitmapConverter converter;
   const auto handle = converter.fromIClipboard(dib);
   QVERIFY(handle != nullptr);
-  QCOMPARE(GlobalSize(handle), SIZE_T(dib.size()));
-  const auto *result = static_cast<const char *>(GlobalLock(handle));
+  QVERIFY(GlobalSize(handle) >= SIZE_T(headerSize + 4));
+  const auto *result = static_cast<const quint8 *>(GlobalLock(handle));
   QVERIFY(result != nullptr);
-  QCOMPARE(std::string(result, GlobalSize(handle)), dib);
+  QCOMPARE(qFromLittleEndian<quint32>(result), quint32(headerSize));
+  QCOMPARE(qFromLittleEndian<qint32>(result + 8), qint32(1));
+  QCOMPARE(qFromLittleEndian<quint16>(result + 14), quint16(24));
+  QCOMPARE(qFromLittleEndian<quint32>(result + 16), quint32(BI_RGB));
+  QCOMPARE(result[headerSize], quint8(0x12));
+  QCOMPARE(result[headerSize + 1], quint8(0x34));
+  QCOMPARE(result[headerSize + 2], quint8(0x56));
   GlobalUnlock(handle);
   GlobalFree(handle);
 }

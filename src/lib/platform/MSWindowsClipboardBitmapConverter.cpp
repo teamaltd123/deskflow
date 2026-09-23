@@ -8,47 +8,33 @@
 
 #include "platform/MSWindowsClipboardBitmapConverter.h"
 
+#include "base/ClipboardBitmap.h"
 #include "base/Log.h"
 
-#include <QtEndian>
-
-#include <cstdlib>
-#include <limits>
+#include <string_view>
 
 namespace {
-bool normaliseMalformedMacDib(const std::string &data, std::string &normalisedData)
+
+// Peers and Windows apps produce many DIB variants (V4/V5 headers, bit fields,
+// top-down rows, alpha, and the malformed DIBs sent by Deskflow <= 1.26 on macOS
+// and X11). Only the canonical 24 bpp, bottom-up BI_RGB form goes on the wire or
+// into CF_DIB; see ClipboardBitmap.h.
+std::string canonicalise(std::string_view dib, const char *direction)
 {
-  if (data.size() < sizeof(BITMAPINFOHEADER)) {
-    return false;
+  const auto result = deskflow::clipboard::canonicalDibFromDib(dib);
+  if (!result.error.empty()) {
+    LOG_WARN("dropping %s clipboard image: %s", direction, result.error.c_str());
+    return std::string();
   }
-
-  const auto *header = reinterpret_cast<const BITMAPINFOHEADER *>(data.data());
-  if (header->biWidth <= 0) {
-    return false;
+  if (result.repairedLegacy) {
+    LOG_INFO("repaired malformed clipboard image from an older macOS/X11 peer");
   }
-
-  const auto width = static_cast<size_t>(header->biWidth);
-  const auto height = static_cast<size_t>(std::abs(static_cast<int64_t>(header->biHeight)));
-  if (height == 0 || width > (std::numeric_limits<size_t>::max() - sizeof(BITMAPINFOHEADER)) / 4 / height) {
-    return false;
+  if (result.flattenedAlpha) {
+    LOG_DEBUG("flattened clipboard image transparency onto white");
   }
-  const auto expectedSize = sizeof(BITMAPINFOHEADER) + width * height * 4;
-
-  // macOS can describe an INFOHEADER-sized 32-bit pixel payload as a V5 DIB.
-  // Windows then interprets the first pixels as V5 colour masks. The pixel
-  // bytes are ordinary BGRA, so publish a canonical BI_RGB DIB instead.
-  if (header->biSize <= sizeof(BITMAPINFOHEADER) || header->biPlanes != 1 || header->biBitCount != 32 ||
-      header->biCompression != BI_BITFIELDS || expectedSize != data.size()) {
-    return false;
-  }
-
-  normalisedData = data.substr(0, sizeof(BITMAPINFOHEADER));
-  qToLittleEndian<quint32>(sizeof(BITMAPINFOHEADER), reinterpret_cast<quint8 *>(&normalisedData[0]));
-  qToLittleEndian<quint32>(BI_RGB, reinterpret_cast<quint8 *>(&normalisedData[0]) + 16);
-  normalisedData += data.substr(sizeof(BITMAPINFOHEADER));
-  LOG_INFO("normalised malformed macOS clipboard image to BI_RGB");
-  return true;
+  return result.dib;
 }
+
 } // namespace
 
 //
@@ -68,19 +54,18 @@ UINT MSWindowsClipboardBitmapConverter::getWin32Format() const
 HANDLE
 MSWindowsClipboardBitmapConverter::fromIClipboard(const std::string &data) const
 {
-  std::string normalisedData;
-  const auto *clipboardData = &data;
-  if (normaliseMalformedMacDib(data, normalisedData)) {
-    clipboardData = &normalisedData;
+  const std::string dib = canonicalise(data, "received");
+  if (dib.empty()) {
+    return nullptr;
   }
 
   // copy to memory handle
-  HGLOBAL gData = GlobalAlloc(GMEM_MOVEABLE | GMEM_DDESHARE, clipboardData->size());
+  HGLOBAL gData = GlobalAlloc(GMEM_MOVEABLE | GMEM_DDESHARE, dib.size());
   if (gData != nullptr) {
     // get a pointer to the allocated memory
     char *dst = (char *)GlobalLock(gData);
     if (dst != nullptr) {
-      memcpy(dst, clipboardData->data(), clipboardData->size());
+      memcpy(dst, dib.data(), dib.size());
       GlobalUnlock(gData);
     } else {
       GlobalFree(gData);
@@ -98,21 +83,23 @@ std::string MSWindowsClipboardBitmapConverter::toIClipboard(HANDLE data) const
   if (src == nullptr) {
     return std::string();
   }
-  uint32_t srcSize = (uint32_t)GlobalSize(data);
+  const auto srcSize = static_cast<size_t>(GlobalSize(data));
 
-  // check image type
-  const BITMAPINFO *bitmap = static_cast<const BITMAPINFO *>(src);
-  LOG(
-      (CLOG_INFO "bitmap: %dx%d %d", bitmap->bmiHeader.biWidth, bitmap->bmiHeader.biHeight,
-       (int)bitmap->bmiHeader.biBitCount)
-  );
-  if (bitmap->bmiHeader.biPlanes == 1 && (bitmap->bmiHeader.biBitCount == 24 || bitmap->bmiHeader.biBitCount == 32) &&
-      bitmap->bmiHeader.biCompression == BI_RGB) {
-    // already in canonical form
-    std::string image(static_cast<char const *>(src), srcSize);
+  // 24/32 bpp images (any header version, bit fields, top-down) convert directly
+  auto direct = deskflow::clipboard::canonicalDibFromDib(std::string_view(static_cast<const char *>(src), srcSize));
+  if (direct.error.empty()) {
     GlobalUnlock(data);
-    return image;
+    return std::move(direct.dib);
   }
+
+  // anything else (palettes, 16 bpp, RLE) is rendered to 32 bpp by GDI first
+  if (srcSize < sizeof(BITMAPINFOHEADER)) {
+    GlobalUnlock(data);
+    LOG_WARN("dropping sent clipboard image: %s", direct.error.c_str());
+    return std::string();
+  }
+  const BITMAPINFO *bitmap = static_cast<const BITMAPINFO *>(src);
+  LOG_DEBUG("converting clipboard image with GDI (%s)", direct.error.c_str());
 
   // create a destination DIB section
   LOG_INFO("convert image from: depth=%d comp=%d", bitmap->bmiHeader.biBitCount, bitmap->bmiHeader.biCompression);
@@ -144,7 +131,8 @@ std::string MSWindowsClipboardBitmapConverter::toIClipboard(HANDLE data) const
   // find the start of the pixel data
   const char *srcBits = (const char *)bitmap + bitmap->bmiHeader.biSize;
   if (bitmap->bmiHeader.biBitCount >= 16) {
-    if (bitmap->bmiHeader.biCompression == BI_BITFIELDS &&
+    // bit masks follow a BITMAPINFOHEADER; V4/V5 headers already contain them
+    if (bitmap->bmiHeader.biCompression == BI_BITFIELDS && bitmap->bmiHeader.biSize == sizeof(BITMAPINFOHEADER) &&
         (bitmap->bmiHeader.biBitCount == 16 || bitmap->bmiHeader.biBitCount == 32)) {
       srcBits += 3 * sizeof(DWORD);
     }
@@ -174,5 +162,5 @@ std::string MSWindowsClipboardBitmapConverter::toIClipboard(HANDLE data) const
   // release handle
   GlobalUnlock(data);
 
-  return image;
+  return canonicalise(image, "sent");
 }
