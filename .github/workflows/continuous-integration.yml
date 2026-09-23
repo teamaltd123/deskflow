@@ -40,6 +40,16 @@ jobs:
             arch: "amd64"
             qt-version: 6.10.1
 
+          # Delivered in addition to windows-2022-x64: macOS Apple Silicon build.
+          # Recovered from upstream v1.26.0 matrix (patch 0003 trimmed it away).
+          # Only difference: timeout raised 10 -> 60, because the fork has no warm
+          # Qt cache on the first run and a timeout can only truncate a good build.
+          - name: "macos-arm64"
+            runs-on: macos-15
+            timeout: 60
+            qt-version: 6.10.1
+            config-args: '-DCMAKE_OSX_ARCHITECTURES="arm64" -DCMAKE_OSX_DEPLOYMENT_TARGET=14 -DCMAKE_OSX_SYSROOT=/Applications/Xcode_16.4.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk'
+
     steps:
       # Make sure the container has git before we do anything else
       - name: Install Git on Container
@@ -128,7 +138,11 @@ jobs:
           branch: gh-pages
           folder: build/doc/dev/html
 
+      # always(): the installer is produced by the "Build" step, so deliver it even if a
+      # later verification step (tests / test-package) fails. Without this a test failure
+      # would discard an already-built, installable package.
       - name: Upload
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: package-${{ env.PACKAGE_PREFIX }}-${{ matrix.target.name }}
