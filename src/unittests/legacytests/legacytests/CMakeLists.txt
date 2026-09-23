@@ -7,3 +7,11 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(target legacytests)
 add_executable(${target} ${sources} ${headers})
 target_link_libraries(${target} ${test_libs} common)
+
+# googletest newer than this 2026-02 tree deprecates gmock Invoke(); test-only code,
+# keep building with warnings-as-errors elsewhere.
+if(MSVC)
+  target_compile_options(${target} PRIVATE /wd4996)
+else()
+  target_compile_options(${target} PRIVATE -Wno-error=deprecated-declarations)
+endif()
